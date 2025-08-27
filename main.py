@@ -596,6 +596,188 @@ def levels(tickers: str = Query(..., description="Comma-separated tickers (e.g.,
         logger.error(f"Error in levels endpoint: {e}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
+# ---------------- N8N Integration Endpoints ----------------
+from fastapi import BackgroundTasks
+
+class WebhookData(BaseModel):
+    source: str = "n8n"
+    execution_id: Optional[str] = None
+    capital: Optional[float] = None
+    top_n: Optional[int] = None
+    price_cap: Optional[float] = None
+    ref_date: Optional[str] = None
+    callback_url: Optional[str] = None
+
+@app.post("/webhook/rebalance")
+async def webhook_rebalance(webhook_data: WebhookData):
+    """
+    Webhook endpoint for n8n rebalancing automation
+    """
+    try:
+        logger.info(f"Webhook triggered by {webhook_data.source}, execution_id: {webhook_data.execution_id}")
+        
+        # Extract parameters
+        _capital = webhook_data.capital or cfg['capital']
+        _top_n = webhook_data.top_n or cfg['top_n']
+        _cap = webhook_data.price_cap or cfg.get('price_cap')
+        
+        # Run strategy analysis
+        result = run(
+            capital=_capital, 
+            top_n=_top_n, 
+            price_cap=_cap, 
+            ref_date=webhook_data.ref_date
+        )
+        
+        # Add webhook metadata
+        result['webhook'] = {
+            'triggered_at': datetime.now().isoformat(),
+            'source': webhook_data.source,
+            'execution_id': webhook_data.execution_id,
+            'callback_url': webhook_data.callback_url
+        }
+        
+        # If callback URL provided, send async notification
+        if webhook_data.callback_url:
+            # This would normally send an async HTTP request to the callback URL
+            logger.info(f"Would send callback to: {webhook_data.callback_url}")
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Webhook error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/webhook/status/{execution_id}")
+async def webhook_status(execution_id: str):
+    """
+    Check status of webhook execution
+    """
+    # In a real implementation, this would check a database or cache
+    return {
+        "execution_id": execution_id, 
+        "status": "completed",
+        "timestamp": datetime.now().isoformat()
+    }
+
+@app.post("/webhook/portfolio-compare")
+async def webhook_portfolio_compare(
+    target_portfolio: List[Dict[str, Any]],
+    current_holdings: List[Dict[str, Any]]
+):
+    """
+    Compare target portfolio with current holdings and generate rebalance orders
+    """
+    try:
+        rebalance_orders = []
+        current_map = {holding['ticker']: holding for holding in current_holdings}
+        
+        # Generate rebalancing logic
+        for target in target_portfolio:
+            ticker = target.get('Ticker', target.get('ticker'))
+            target_qty = target.get('Qty', target.get('quantity', 0))
+            current = current_map.get(ticker, {'quantity': 0})
+            current_qty = current.get('quantity', 0)
+            
+            qty_diff = target_qty - current_qty
+            
+            if abs(qty_diff) > 0:
+                rebalance_orders.append({
+                    'ticker': ticker,
+                    'action': 'BUY' if qty_diff > 0 else 'SELL',
+                    'quantity': abs(qty_diff),
+                    'target_qty': target_qty,
+                    'current_qty': current_qty,
+                    'price': target.get('Price', target.get('price', 0)),
+                    'momentum_score': target.get('MomentumScore', 0),
+                    'priority': target.get('Rank', 999)
+                })
+        
+        # Handle positions to exit
+        for ticker, holding in current_map.items():
+            if not any(t.get('Ticker', t.get('ticker')) == ticker for t in target_portfolio):
+                if holding.get('quantity', 0) > 0:
+                    rebalance_orders.append({
+                        'ticker': ticker,
+                        'action': 'SELL',
+                        'quantity': holding['quantity'],
+                        'target_qty': 0,
+                        'current_qty': holding['quantity'],
+                        'reason': 'EXIT_POSITION',
+                        'priority': 1
+                    })
+        
+        # Sort orders
+        rebalance_orders.sort(key=lambda x: (x['action'] == 'BUY', x['priority']))
+        
+        return {
+            'timestamp': datetime.now().isoformat(),
+            'total_orders': len(rebalance_orders),
+            'buy_orders': len([o for o in rebalance_orders if o['action'] == 'BUY']),
+            'sell_orders': len([o for o in rebalance_orders if o['action'] == 'SELL']),
+            'orders': rebalance_orders
+        }
+        
+    except Exception as e:
+        logger.error(f"Portfolio compare error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/webhook/validate-orders")
+async def webhook_validate_orders(orders: List[Dict[str, Any]], max_position_size: float = 0.15):
+    """
+    Validate orders for risk management and market hours
+    """
+    try:
+        # Check market hours
+        now = datetime.now(gettz(cfg.get("tz", "Asia/Kolkata")))
+        hour = now.hour
+        minute = now.minute
+        day = now.weekday()
+        
+        is_market_open = (
+            day < 5 and  # Monday to Friday (0-4)
+            ((hour == 9 and minute >= 15) or (hour > 9 and hour < 15) or (hour == 15 and minute <= 30))
+        )
+        
+        validated_orders = []
+        rejected_orders = []
+        warnings = []
+        
+        if not is_market_open:
+            warnings.append("Market is closed. Orders will be queued for next session.")
+        
+        # Validate each order
+        for order in orders:
+            estimated_value = order.get('estimated_value', 0)
+            total_capital = order.get('total_capital', cfg['capital'])
+            position_size = estimated_value / total_capital if total_capital > 0 else 0
+            
+            if position_size > max_position_size:
+                rejected_orders.append({
+                    **order,
+                    'rejection_reason': f"Position size {position_size*100:.2f}% exceeds limit {max_position_size*100:.2f}%"
+                })
+                warnings.append(f"Rejected {order.get('ticker')}: Position size too large")
+            else:
+                validated_orders.append(order)
+        
+        return {
+            'timestamp': datetime.now().isoformat(),
+            'market_open': is_market_open,
+            'validated_orders': validated_orders,
+            'rejected_orders': rejected_orders,
+            'warnings': warnings,
+            'validation_summary': {
+                'total_orders': len(orders),
+                'validated': len(validated_orders),
+                'rejected': len(rejected_orders)
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Order validation error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc):
     """Global exception handler"""
