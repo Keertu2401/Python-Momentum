@@ -1,0 +1,40 @@
+# ---------- Strategy & compute settings ----------
+# Data source for stock universe
+universe_source: "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
+
+# Historical data settings (optimized for better performance)
+history_days: 600            # ~2.5 years for robust 12M+ calculations
+lookback_6m_days: 126        # 6 months (~6 months of trading days)
+lookback_12m_days: 252       # 12 months (~1 year of trading days)
+exclude_1m_days: 21          # Exclude last 1 month for 12M ex-1M calculation
+vol_window_days: 126         # 6-month volatility window
+sma_window_days: 200         # 200-day moving average for trend filter
+
+# Portfolio settings
+top_n: 15                    # Reduced for better diversification
+price_cap: 3000              # Lower price cap for better liquidity (INR)
+capital: 500000              # Default capital allocation
+
+# Enhanced filtering (new features)
+min_momentum_score: null     # Minimum momentum score (null = no filter)
+min_volume_filter: true      # Filter low volume stocks
+min_market_cap: 1000         # Minimum market cap in crores (null = no filter)
+
+# Risk management
+max_position_size: 10        # Maximum position size as % of portfolio
+volatility_cap: 50           # Maximum allowed volatility %
+
+# Output settings
+write_csv: true
+output_dir: "output"         # CSV files output directory
+
+# Regional/timezone settings
+tz: "Asia/Kolkata"
+
+# Performance optimizations
+batch_size: 100              # Batch size for data downloads
+enable_caching: true         # Enable data caching
+cache_duration_hours: 6      # Cache duration in hours
+
+# Logging
+log_level: "INFO"           # Logging level: DEBUG, INFO, WARNING, ERROR
