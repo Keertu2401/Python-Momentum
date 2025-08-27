@@ -218,13 +218,13 @@ def compute_dates_idx(prices: pd.DataFrame, ref_date: pd.Timestamp):
         raise ValueError("Price data is empty")
     
     # Normalize reference date to timezone-naive date to match prices index
-    if isinstance(ref_date, pd.Timestamp):
-        if ref_date.tz is not None:
-            ref_date = ref_date.tz_localize(None)
-        ref_date = ref_date.normalize()
+    ref_date = pd.Timestamp(ref_date)
+    if ref_date.tz is not None:
+        ref_date = ref_date.tz_localize(None)
+    ref_date = ref_date.normalize()
 
     # Find the actual reference date in the data
-    available_dates = prices.index
+    available_dates = pd.DatetimeIndex(pd.to_datetime(prices.index))
     # Ensure available_dates is timezone-naive
     if getattr(available_dates, 'tz', None) is not None:
         available_dates = available_dates.tz_localize(None)
