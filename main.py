@@ -429,6 +429,12 @@ def run(
                 raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
         else:
             end_dt = now_local()
+
+        # Ensure end_dt is timezone-naive and normalized to match price index
+        end_dt = pd.Timestamp(end_dt)
+        if getattr(end_dt, 'tz', None) is not None:
+            end_dt = end_dt.tz_localize(None)
+        end_dt = end_dt.normalize()
         
         # Load universe and download data
         universe = load_universe()
