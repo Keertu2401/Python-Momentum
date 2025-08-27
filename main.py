@@ -205,36 +205,42 @@ def yf_download(tickers, start, end, batch=100):
     return result
 
 def compute_dates_idx(prices: pd.DataFrame, ref_date: pd.Timestamp):
-    """Compute date indices with better error handling"""
+    """Compute date indices with safe timezone handling."""
     if prices.empty:
         raise ValueError("Price data is empty")
-    
-    # Find the actual reference date in the data
+
+    # --- TZ FIX: make both sides timezone-naive so comparisons work ---
     available_dates = prices.index
+    if isinstance(available_dates, pd.DatetimeIndex) and available_dates.tz is not None:
+        available_dates = available_dates.tz_localize(None)
+    if isinstance(ref_date, pd.Timestamp) and ref_date.tzinfo is not None:
+        ref_date = ref_date.tz_localize(None)
+    # ------------------------------------------------------------------
+
+    # If ref_date isn't in the data, use the last available date on/before it
     if ref_date not in available_dates:
-        # Find the closest available date before ref_date
         earlier_dates = available_dates[available_dates <= ref_date]
-        if earlier_dates.empty:
+        if len(earlier_dates) == 0:
             raise ValueError(f"No data available before reference date {ref_date.date()}")
         ref_date = earlier_dates[-1]
         logger.info(f"Adjusted reference date to last available: {ref_date.date()}")
-    
+
     pos = available_dates.get_loc(ref_date)
-    
-    # Check if we have enough history
+
+    # Ensure enough history exists
     min_needed = max(cfg["lookback_12m_days"], cfg["sma_window_days"], cfg["vol_window_days"])
     if pos < min_needed:
         raise ValueError(
             f"Insufficient history at {ref_date.date()}. "
             f"Need {min_needed} trading days, but only have {pos}"
         )
-    
+
     idx_today = pos
     idx_6m = max(0, pos - cfg["lookback_6m_days"])
     idx_12m = max(0, pos - cfg["lookback_12m_days"])
-    idx_1m_back = max(0, pos - cfg["exclude_1m_days"])
-    
+    idx_1m_back = max(0, pos - cfg.get("lookback_1m_days", 21))
     return idx_today, idx_6m, idx_12m, idx_1m_back
+
 
 def momentum_frame(prices: pd.DataFrame, ref_date: pd.Timestamp):
     """Enhanced momentum calculation with better logic"""
