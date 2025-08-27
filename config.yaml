@@ -1,40 +1,43 @@
-# ---------- Strategy & compute settings ----------
-# Data source for stock universe
+# Momentum Strategy Configuration File
+# All parameters can be overridden via API query parameters
+
+# Portfolio Settings
+capital: 500000          # Total capital in INR
+top_n: 15               # Number of top stocks to select
+price_cap: 3000         # Maximum price per share in INR (set to null to disable)
+
+# Stock Universe Source
 universe_source: "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
 
-# Historical data settings (optimized for better performance)
-history_days: 600            # ~2.5 years for robust 12M+ calculations
-lookback_6m_days: 126        # 6 months (~6 months of trading days)
-lookback_12m_days: 252       # 12 months (~1 year of trading days)
-exclude_1m_days: 21          # Exclude last 1 month for 12M ex-1M calculation
-vol_window_days: 126         # 6-month volatility window
-sma_window_days: 200         # 200-day moving average for trend filter
+# Strategy Parameters (in trading days)
+history_days: 400        # Total price history to download
+lookback_6m_days: 126    # ~6 months of trading days
+lookback_12m_days: 252   # ~12 months of trading days
+exclude_1m_days: 21      # Exclude last 1 month for momentum calc
+vol_window_days: 63      # ~3 months for volatility calculation
+sma_window_days: 200     # 200-day simple moving average
 
-# Portfolio settings
-top_n: 15                    # Reduced for better diversification
-price_cap: 3000              # Lower price cap for better liquidity (INR)
-capital: 500000              # Default capital allocation
+# Output Settings
+output_dir: "output"     # Directory to save CSV files
+write_csv: true          # Enable CSV output
+tz: "Asia/Kolkata"       # Timezone for date calculations
 
-# Enhanced filtering (new features)
-min_momentum_score: null     # Minimum momentum score (null = no filter)
-min_volume_filter: true      # Filter low volume stocks
-min_market_cap: 1000         # Minimum market cap in crores (null = no filter)
+# Optional Filters (can be set via API parameters)
+# min_momentum_score: 1.0  # Minimum momentum score filter
+# max_volatility: 40.0     # Maximum volatility filter (%)
 
-# Risk management
-max_position_size: 10        # Maximum position size as % of portfolio
-volatility_cap: 50           # Maximum allowed volatility %
+# Risk Management (for /levels endpoint)
+atr_period: 14           # ATR calculation period
+stop_multipliers:        # ATR multipliers for stops/targets
+  conservative_stop: 2.0
+  aggressive_stop: 1.5
+  target: 2.0
 
-# Output settings
-write_csv: true
-output_dir: "output"         # CSV files output directory
+# Data Quality Settings
+min_data_coverage: 0.6   # Minimum % of data points required
+max_fill_days: 5         # Max days to forward fill missing data
 
-# Regional/timezone settings
-tz: "Asia/Kolkata"
-
-# Performance optimizations
-batch_size: 100              # Batch size for data downloads
-enable_caching: true         # Enable data caching
-cache_duration_hours: 6      # Cache duration in hours
-
-# Logging
-log_level: "INFO"           # Logging level: DEBUG, INFO, WARNING, ERROR
+# Performance Settings
+download_batch_size: 100 # Tickers per batch for yfinance
+max_retries: 3          # Retry attempts for failed downloads
+request_delay: 0.1      # Delay between requests (seconds)
