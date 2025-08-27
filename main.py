@@ -47,18 +47,21 @@ app = FastAPI(
 
 # ---------------- Helpers ----------------
 def now_local():
-    """Get current local time and find the last trading day"""
+    """Get current local time (timezone-naive date) and find the last trading day"""
     local_tz = gettz(cfg.get("tz", "Asia/Kolkata"))
     now = pd.Timestamp.now(tz=local_tz)
     
     # If it's weekend or before market hours, go to previous trading day
     if now.weekday() >= 5:  # Saturday or Sunday
         days_back = now.weekday() - 4  # Go to Friday
-        return (now - pd.Timedelta(days=days_back)).normalize()
+        candidate = (now - pd.Timedelta(days=days_back)).normalize()
     elif now.hour < 9:  # Before market open
-        return (now - pd.Timedelta(days=1)).normalize()
+        candidate = (now - pd.Timedelta(days=1)).normalize()
     else:
-        return now.normalize()
+        candidate = now.normalize()
+    
+    # Return timezone-naive timestamp to avoid tz-aware vs tz-naive comparisons later
+    return candidate.tz_localize(None)
 
 def load_universe():
     """Load stock universe with fallback handling"""
