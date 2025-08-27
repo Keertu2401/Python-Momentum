@@ -1,0 +1,161 @@
+{
+  "name": "Simple Momentum Strategy - Weekly Rebalancing",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 9 * * 1"
+            }
+          ]
+        }
+      },
+      "id": "weekly-trigger",
+      "name": "Weekly Trigger (Monday 9 AM)",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "url": "http://localhost:8000/run",
+        "options": {
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "capital",
+                "value": "100000"
+              },
+              {
+                "name": "top_n",
+                "value": "10"
+              }
+            ]
+          }
+        }
+      },
+      "id": "get-momentum",
+      "name": "Get Momentum Strategy",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Simple processing of momentum strategy results\nconst data = $input.all()[0].json;\n\n// Extract key information\nconst summary = data.summary || {};\nconst topStocks = data.top || [];\n\n// Create simple report\nconst report = {\n  date: new Date().toISOString().split('T')[0],\n  totalCapital: summary.total_capital || 0,\n  selectedStocks: summary.selected_stocks || 0,\n  utilization: summary.utilization_pct || 0,\n  avgScore: summary.avg_momentum_score || 0,\n  topHoldings: topStocks.slice(0, 5).map(stock => ({\n    ticker: stock.Ticker,\n    price: stock.Price,\n    allocation: stock['Allocation(%)'],\n    score: stock.MomentumScore\n  }))\n};\n\nreturn [{ json: report }];"
+      },
+      "id": "process-results",
+      "name": "Process Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": "YOUR_GOOGLE_SHEET_ID_HERE",
+        "sheetName": "Weekly_Reports",
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Date": "={{ $json.date }}",
+            "Total_Capital": "={{ $json.totalCapital }}",
+            "Selected_Stocks": "={{ $json.selectedStocks }}",
+            "Utilization_Pct": "={{ $json.utilization }}",
+            "Avg_Momentum_Score": "={{ $json.avgScore }}",
+            "Top_Stock_1": "={{ $json.topHoldings[0]?.ticker }}",
+            "Top_Stock_2": "={{ $json.topHoldings[1]?.ticker }}",
+            "Top_Stock_3": "={{ $json.topHoldings[2]?.ticker }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "log-to-sheets",
+      "name": "Log to Google Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [900, 200]
+    },
+    {
+      "parameters": {
+        "channel": "#trading",
+        "text": "📊 *Weekly Momentum Strategy Report*\\n\\n🗓️ Date: {{ $json.date }}\\n💰 Capital: ₹{{ ($json.totalCapital / 100000).toFixed(1) }}L\\n📈 Stocks Selected: {{ $json.selectedStocks }}\\n⚡ Utilization: {{ $json.utilization.toFixed(1) }}%\\n🎯 Avg Score: {{ $json.avgScore.toFixed(2) }}\\n\\n🔝 *Top Holdings:*\\n{{ $json.topHoldings.map(h => `• ${h.ticker}: ${h.allocation.toFixed(1)}%`).join('\\n') }}",
+        "otherOptions": {
+          "mrkdwn": true
+        }
+      },
+      "id": "slack-alert",
+      "name": "Send Slack Alert",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 1,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "fromEmail": "trading@yourcompany.com",
+        "toEmail": "portfolio@yourcompany.com",
+        "subject": "Weekly Momentum Strategy Report - {{ $json.date }}",
+        "html": "<h2>📊 Weekly Momentum Strategy Report</h2><p><strong>Date:</strong> {{ $json.date }}</p><p><strong>Capital:</strong> ₹{{ ($json.totalCapital / 100000).toFixed(1) }}L</p><p><strong>Selected Stocks:</strong> {{ $json.selectedStocks }}</p><p><strong>Utilization:</strong> {{ $json.utilization.toFixed(1) }}%</p><p><strong>Average Momentum Score:</strong> {{ $json.avgScore.toFixed(2) }}</p><h3>Top Holdings:</h3><ul>{{ $json.topHoldings.map(h => `<li>${h.ticker}: ${h.allocation.toFixed(1)}% (Score: ${h.score.toFixed(2)})</li>`).join('') }}</ul>"
+      },
+      "id": "email-report",
+      "name": "Send Email Report",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2,
+      "position": [900, 400]
+    }
+  ],
+  "connections": {
+    "Weekly Trigger (Monday 9 AM)": {
+      "main": [
+        [
+          {
+            "node": "Get Momentum Strategy",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Momentum Strategy": {
+      "main": [
+        [
+          {
+            "node": "Process Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Results": {
+      "main": [
+        [
+          {
+            "node": "Log to Google Sheets",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Send Slack Alert",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Send Email Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": ["trading", "momentum", "simple"],
+  "meta": {
+    "templateCredsSetupCompleted": false
+  }
+}

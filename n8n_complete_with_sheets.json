@@ -1,0 +1,244 @@
+{
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "instanceId": "momentum-strategy-complete"
+  },
+  "name": "Momentum Strategy - Complete with Google Sheets",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 9 * * 1"
+            }
+          ]
+        }
+      },
+      "id": "cron-trigger",
+      "name": "Weekly Schedule",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://YOUR-APP-URL-HERE/run",
+        "options": {
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "capital",
+                "value": "100000"
+              },
+              {
+                "name": "top_n",
+                "value": "5"
+              },
+              {
+                "name": "price_cap",
+                "value": "3000"
+              }
+            ]
+          },
+          "timeout": 60000
+        }
+      },
+      "id": "api-call",
+      "name": "API Call",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        460,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Process momentum strategy data\nconst data = $input.all()[0].json;\n\n// Validate input\nif (!data || !data.summary) {\n  return [{ json: { error: 'Invalid API response', status: 'FAILED' } }];\n}\n\n// Extract data safely\nconst summary = data.summary;\nconst topStocks = data.top || [];\n\n// Create clean output\nconst result = {\n  date: new Date().toISOString().split('T')[0],\n  timestamp: new Date().toISOString(),\n  capital: summary.total_capital || 0,\n  stocks: summary.selected_stocks || 0,\n  utilization: Math.round((summary.utilization_pct || 0) * 100) / 100,\n  score: Math.round((summary.avg_momentum_score || 0) * 100) / 100,\n  stock1: topStocks[0]?.Ticker || '',\n  stock2: topStocks[1]?.Ticker || '',\n  stock3: topStocks[2]?.Ticker || '',\n  price1: topStocks[0]?.Price || 0,\n  price2: topStocks[1]?.Price || 0,\n  price3: topStocks[2]?.Price || 0,\n  score1: topStocks[0]?.MomentumScore || 0,\n  score2: topStocks[1]?.MomentumScore || 0,\n  score3: topStocks[2]?.MomentumScore || 0,\n  status: 'SUCCESS'\n};\n\nreturn [{ json: result }];"
+      },
+      "id": "process-data",
+      "name": "Process Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        680,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.status }}",
+              "rightValue": "SUCCESS",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "check-success",
+      "name": "Check Success",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        900,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "resource": "sheet",
+        "operation": "appendOrUpdate",
+        "documentId": "YOUR-GOOGLE-SHEET-ID-HERE",
+        "sheetName": "Weekly_Reports",
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Date": "={{ $json.date }}",
+            "Capital": "={{ $json.capital }}",
+            "Stocks": "={{ $json.stocks }}",
+            "Utilization": "={{ $json.utilization }}",
+            "Score": "={{ $json.score }}",
+            "Stock1": "={{ $json.stock1 }}",
+            "Stock2": "={{ $json.stock2 }}",
+            "Stock3": "={{ $json.stock3 }}",
+            "Price1": "={{ $json.price1 }}",
+            "Price2": "={{ $json.price2 }}",
+            "Price3": "={{ $json.price3 }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "google-sheets",
+      "name": "Log to Google Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        1120,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "channel": "#trading",
+        "text": "📊 *Momentum Strategy Weekly Report*\n\n📅 Date: {{ $json.date }}\n💰 Capital: ₹{{ ($json.capital / 100000).toFixed(1) }}L\n📈 Stocks Selected: {{ $json.stocks }}\n⚡ Utilization: {{ $json.utilization }}%\n🎯 Avg Score: {{ $json.score }}\n\n🔝 *Top Holdings:*\n1. {{ $json.stock1 }} - ₹{{ $json.price1 }} (Score: {{ $json.score1 }})\n2. {{ $json.stock2 }} - ₹{{ $json.price2 }} (Score: {{ $json.score2 }})\n3. {{ $json.stock3 }} - ₹{{ $json.price3 }} (Score: {{ $json.score3 }})",
+        "otherOptions": {
+          "mrkdwn": true
+        }
+      },
+      "id": "slack-notification",
+      "name": "Slack Notification",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 1,
+      "position": [
+        1120,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "fromEmail": "trading@yourcompany.com",
+        "toEmail": "portfolio@yourcompany.com",
+        "subject": "Momentum Strategy Report - {{ $json.date }}",
+        "emailType": "html",
+        "message": "<h2>📊 Momentum Strategy Report</h2>\n<p><strong>Date:</strong> {{ $json.date }}</p>\n<p><strong>Capital:</strong> ₹{{ ($json.capital / 100000).toFixed(1) }} Lakhs</p>\n<p><strong>Selected Stocks:</strong> {{ $json.stocks }}</p>\n<p><strong>Utilization:</strong> {{ $json.utilization }}%</p>\n<p><strong>Average Score:</strong> {{ $json.score }}</p>\n\n<h3>Top Holdings:</h3>\n<table border='1' style='border-collapse: collapse;'>\n<tr style='background-color: #f2f2f2;'>\n<th>Rank</th><th>Stock</th><th>Price</th><th>Score</th>\n</tr>\n<tr><td>1</td><td>{{ $json.stock1 }}</td><td>₹{{ $json.price1 }}</td><td>{{ $json.score1 }}</td></tr>\n<tr><td>2</td><td>{{ $json.stock2 }}</td><td>₹{{ $json.price2 }}</td><td>{{ $json.score2 }}</td></tr>\n<tr><td>3</td><td>{{ $json.stock3 }}</td><td>₹{{ $json.price3 }}</td><td>{{ $json.score3 }}</td></tr>\n</table>\n\n<p><em>Generated automatically by Momentum Strategy System</em></p>"
+      },
+      "id": "email-notification",
+      "name": "Email Notification",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        600
+      ]
+    }
+  ],
+  "connections": {
+    "Weekly Schedule": {
+      "main": [
+        [
+          {
+            "node": "API Call",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API Call": {
+      "main": [
+        [
+          {
+            "node": "Process Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Data": {
+      "main": [
+        [
+          {
+            "node": "Check Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Success": {
+      "main": [
+        [
+          {
+            "node": "Log to Google Sheets",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Slack Notification",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Email Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "staticData": null,
+  "tags": [
+    "momentum",
+    "trading",
+    "complete"
+  ],
+  "triggerCount": 1,
+  "updatedAt": "2024-01-15T10:00:00.000Z",
+  "versionId": "1"
+}
