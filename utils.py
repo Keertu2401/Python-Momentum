@@ -322,4 +322,8 @@ def validate_stock_data(data: pd.DataFrame, min_history_days: int = 252) -> Tupl
         removed = clean_stocks.shape[1] - final_stocks.shape[1]
         issues.append(f"Removed {removed} stocks with non-positive prices")
     
-    return final_stocks, issues
+    return final_stocks, issues 
+if __name__ == "__main__":
+    import uvicorn, os
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port)
