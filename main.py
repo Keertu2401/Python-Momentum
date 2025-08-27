@@ -196,7 +196,12 @@ def yf_download(tickers, start, end, batch=100):
     
     # Combine all data
     result = pd.concat(frames, axis=1, sort=True)
-    
+
+    # Ensure datetime index is timezone-naive to avoid comparison issues
+    result.index = pd.to_datetime(result.index)
+    if getattr(result.index, 'tz', None) is not None:
+        result.index = result.index.tz_localize(None)
+
     # Forward fill missing values (up to 5 days)
     result = result.fillna(method='ffill', limit=5)
     
@@ -212,8 +217,17 @@ def compute_dates_idx(prices: pd.DataFrame, ref_date: pd.Timestamp):
     if prices.empty:
         raise ValueError("Price data is empty")
     
+    # Normalize reference date to timezone-naive date to match prices index
+    if isinstance(ref_date, pd.Timestamp):
+        if ref_date.tz is not None:
+            ref_date = ref_date.tz_localize(None)
+        ref_date = ref_date.normalize()
+
     # Find the actual reference date in the data
     available_dates = prices.index
+    # Ensure available_dates is timezone-naive
+    if getattr(available_dates, 'tz', None) is not None:
+        available_dates = available_dates.tz_localize(None)
     if ref_date not in available_dates:
         # Find the closest available date before ref_date
         earlier_dates = available_dates[available_dates <= ref_date]
