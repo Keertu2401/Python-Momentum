@@ -1,0 +1,154 @@
+{
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "instanceId": "12345"
+  },
+  "name": "Momentum Strategy - Clean Import",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 9 * * 1"
+            }
+          ]
+        }
+      },
+      "id": "cron-trigger-node",
+      "name": "Weekly Schedule",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "http://localhost:8000/run",
+        "options": {
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "capital",
+                "value": "100000"
+              },
+              {
+                "name": "top_n",
+                "value": "5"
+              },
+              {
+                "name": "price_cap",
+                "value": "3000"
+              }
+            ]
+          },
+          "timeout": 60000
+        }
+      },
+      "id": "http-request-node",
+      "name": "API Call",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        460,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Clean data processing for momentum strategy\nconst data = $input.all()[0].json;\n\n// Validate input\nif (!data) {\n  return [{ json: { error: 'No data received', status: 'FAILED' } }];\n}\n\n// Extract data safely\nconst summary = data.summary || {};\nconst topStocks = Array.isArray(data.top) ? data.top : [];\n\n// Create clean output\nconst output = {\n  timestamp: new Date().toISOString(),\n  date: new Date().toISOString().split('T')[0],\n  capital: Number(summary.total_capital) || 0,\n  stocks: Number(summary.selected_stocks) || 0,\n  utilization: Number(summary.utilization_pct) || 0,\n  score: Number(summary.avg_momentum_score) || 0,\n  stock1: (topStocks[0] && topStocks[0].Ticker) ? topStocks[0].Ticker : '',\n  stock2: (topStocks[1] && topStocks[1].Ticker) ? topStocks[1].Ticker : '',\n  stock3: (topStocks[2] && topStocks[2].Ticker) ? topStocks[2].Ticker : '',\n  status: 'SUCCESS'\n};\n\nreturn [{ json: output }];"
+      },
+      "id": "code-processor-node",
+      "name": "Process Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        680,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.status }}",
+              "rightValue": "SUCCESS",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "success-check-node", 
+      "name": "Check Success",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        900,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Weekly Schedule": {
+      "main": [
+        [
+          {
+            "node": "API Call",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API Call": {
+      "main": [
+        [
+          {
+            "node": "Process Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Data": {
+      "main": [
+        [
+          {
+            "node": "Check Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "staticData": null,
+  "tags": [
+    "momentum",
+    "trading",
+    "basic"
+  ],
+  "triggerCount": 1,
+  "updatedAt": "2024-01-15T10:00:00.000Z",
+  "versionId": "1"
+}
