@@ -1,0 +1,10 @@
+fastapi==0.110.0
+uvicorn[standard]==0.29.0
+pandas==2.2.2
+numpy==1.26.4
+yfinance==0.2.40
+PyYAML==6.0.2
+python-dateutil==2.9.0.post0
+requests==2.31.0
+aiofiles==23.2.1
+python-multipart==0.0.9

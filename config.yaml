@@ -1,0 +1,44 @@
+# ---------- Strategy & compute settings ----------
+universe_source: "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
+
+# How many *business* days back to fetch. Keep >= 252 for 12m ex-1 logic
+history_days: 520            # ~2 years so 12M+ buffers work
+lookback_6m_days: 126        # 6 months
+lookback_12m_days: 252       # 12 months
+exclude_1m_days: 21          # exclude last 1 month for 12m ex-1
+vol_window_days: 126         # 6-month daily vol window
+sma_window_days: 200         # 200-DMA trend filter
+
+# Selection / portfolio defaults
+top_n: 20
+price_cap: 5000              # INR; set null to disable
+capital: 100000              # for suggested Qty & Amount (equal-weight)
+
+# Output settings
+write_csv: true
+output_dir: "output"         # CSVs land here
+csv_timestamp: true          # Add timestamp to CSV filenames
+
+# Regional/timezone
+tz: "Asia/Kolkata"
+
+# Performance settings
+max_workers: 10              # Max parallel downloads
+download_timeout: 30         # Timeout for yfinance downloads
+request_timeout: 30          # Timeout for universe CSV download
+
+# Logging
+log_level: "INFO"            # DEBUG, INFO, WARNING, ERROR
+log_to_file: false           # Whether to also log to file
+log_file: "momentum_api.log" # Log file path if enabled
+
+# Error handling
+retry_failed_downloads: true # Whether to retry failed downloads
+max_retries: 3               # Maximum retry attempts
+retry_delay: 1               # Delay between retries in seconds
+
+# Data validation
+min_data_quality: 0.8        # Minimum data quality threshold (0-1)
+require_volume: false        # Whether to require volume data
+min_price: 10                # Minimum stock price to consider
+max_price: 100000            # Maximum stock price to consider
