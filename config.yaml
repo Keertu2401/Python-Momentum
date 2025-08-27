@@ -1,0 +1,19 @@
+universe_source: "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
+# How many *business* days back to fetch
+history_days: 520
+lookback_6m_days: 126   # 6 months
+lookback_12m_days: 252   # 12 months
+exclude_1m_days: 21      # exclude last 1 month for 12m ex-1
+vol_window_days: 126     # 6-month daily vol window
+sma_window_days: 200     # 200-DMA trend filter
+
+# Selection / portfolio defaults
+top_n: 20
+price_cap: 5000          # INR; set null to disable
+capital: 100000          # Equal-weight capital assumption (INR)
+
+# Output
+write_csv: true
+output_dir: "output"
+
+tz: "Asia/Kolkata"
