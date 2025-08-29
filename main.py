@@ -90,7 +90,7 @@ def calculate_trading_days(start_date, end_date, days_needed):
         extended_calendar = get_nse_trading_calendar(extended_start, end_date)
         trading_days = extended_calendar[
             (extended_calendar >= extended_start) & 
-            (extended_calendar <= end_date)
+            (trading_calendar <= end_date)
         ]
     
     return trading_days[-days_needed:] if len(trading_days) >= days_needed else trading_days
@@ -248,7 +248,7 @@ def load_universe():
     return universe
 
 def yf_download(tickers, start, end, batch=100):
-    """Optimized batch download with better error handling and volume data"""
+    """Optimized batch download with better error handling"""
     if not tickers:
         return pd.DataFrame()
     
@@ -341,7 +341,7 @@ def yf_download(tickers, start, end, batch=100):
     return result
 
 def compute_dates_idx(prices: pd.DataFrame, ref_date: pd.Timestamp):
-    """Compute date indices with proper NSE trading day calculations."""
+    """Compute date indices with safe timezone handling."""
     if prices.empty:
         raise ValueError("Price data is empty")
 
@@ -363,7 +363,7 @@ def compute_dates_idx(prices: pd.DataFrame, ref_date: pd.Timestamp):
 
     pos = available_dates.get_loc(ref_date)
 
-    # Use proper trading day calculations
+    # Ensure enough history exists
     min_needed = max(cfg["lookback_12m_days"], cfg["sma_window_days"], cfg["vol_window_days"])
     if pos < min_needed:
         raise ValueError(
@@ -376,6 +376,7 @@ def compute_dates_idx(prices: pd.DataFrame, ref_date: pd.Timestamp):
     idx_12m = max(0, pos - cfg["lookback_12m_days"])
     idx_1m_back = max(0, pos - cfg.get("lookback_1m_days", 21))
     return idx_today, idx_6m, idx_12m, idx_1m_back
+
 
 def momentum_frame(prices: pd.DataFrame, ref_date: pd.Timestamp, volume_data: dict = None, enriched_data: dict = None):
     """Enhanced momentum calculation with volume filters and enriched data"""
@@ -496,7 +497,7 @@ def momentum_frame(prices: pd.DataFrame, ref_date: pd.Timestamp, volume_data: di
     return df, ref_info
 
 def suggest_allocations(top_df: pd.DataFrame, capital: float, top_n: int):
-    """Enhanced allocation calculation with better logic and proper CSV formatting"""
+    """Enhanced allocation calculation with better logic"""
     if top_df.empty:
         return top_df
     
@@ -513,7 +514,6 @@ def suggest_allocations(top_df: pd.DataFrame, capital: float, top_n: int):
     total_invested = amt.sum()
     allocation_pct = (amt / total_invested * 100) if total_invested > 0 else 0
     
-    # Add required columns for CSV output
     top_df["Qty"] = qty
     top_df["Amount"] = amt
     top_df["Allocation(%)"] = allocation_pct
@@ -566,11 +566,24 @@ class LevelsResponse(BaseModel):
 @app.get("/health")
 def health():
     """Health check endpoint"""
-    return {
-        "status": "healthy",
-        "timestamp": datetime.now().isoformat(),
-        "version": "2.0.0"
-    }
+    try:
+        # Test basic functionality
+        config_status = "ok" if cfg else "error"
+        output_dir_status = "ok" if os.path.exists(cfg.get("output_dir", "output")) else "error"
+        
+        return {
+            "status": "healthy", 
+            "timestamp": datetime.now().isoformat(),
+            "config": config_status,
+            "output_dir": output_dir_status,
+            "version": "2.0.0"
+        }
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"status": "unhealthy", "error": str(e)}
+        )
 
 @app.get("/run", response_model=RunResponse)
 def run(
@@ -1055,4 +1068,14 @@ async def global_exception_handler(request, exc):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    import os
+    
+    # Get port from environment variable or default to 8000
+    port = int(os.environ.get("PORT", 8000))
+    
+    uvicorn.run(
+        app, 
+        host="0.0.0.0", 
+        port=port,
+        log_level="info"
+    )
