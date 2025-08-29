@@ -11,6 +11,8 @@ from datetime import datetime, timedelta
 from dateutil.tz import gettz
 from typing import Optional, List, Dict, Any
 import warnings
+import requests
+from io import StringIO
 
 # Suppress warnings for cleaner output
 warnings.filterwarnings('ignore')
@@ -44,6 +46,140 @@ app = FastAPI(
     version="2.0.0",
     description="Advanced momentum trading strategy with optimized performance and bug fixes"
 )
+
+# ---------------- NSE Trading Calendar and Data Enrichment ----------------
+def get_nse_trading_calendar(start_date, end_date):
+    """Get NSE trading calendar with proper holiday handling"""
+    try:
+        # NSE trading calendar API (alternative to yfinance)
+        url = "https://www.nseindia.com/api/holiday-master?type=trading"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            holidays_data = response.json()
+            holidays = pd.to_datetime(holidays_data.get('holidays', []))
+        else:
+            # Fallback: Use business days and exclude weekends
+            holidays = pd.bdate_range(start=start_date, end=end_date, freq='C')
+            # Filter out weekends
+            holidays = holidays[holidays.weekday < 5]
+    except Exception as e:
+        logger.warning(f"Could not fetch NSE holidays: {e}. Using business days.")
+        # Fallback to business days
+        holidays = pd.bdate_range(start=start_date, end=end_date, freq='C')
+        holidays = holidays[holidays.weekday < 5]
+    
+    return holidays
+
+def calculate_trading_days(start_date, end_date, days_needed):
+    """Calculate actual trading days considering NSE holidays and weekends"""
+    trading_calendar = get_nse_trading_calendar(start_date, end_date)
+    
+    # Filter trading days between start and end
+    trading_days = trading_calendar[
+        (trading_calendar >= start_date) & 
+        (trading_calendar <= end_date)
+    ]
+    
+    if len(trading_days) < days_needed:
+        # Extend backwards to get enough trading days
+        extended_start = start_date - pd.Timedelta(days=days_needed * 2)  # Double to account for holidays
+        extended_calendar = get_nse_trading_calendar(extended_start, end_date)
+        trading_days = extended_calendar[
+            (extended_calendar >= extended_start) & 
+            (extended_calendar <= end_date)
+        ]
+    
+    return trading_days[-days_needed:] if len(trading_days) >= days_needed else trading_days
+
+def enrich_stock_data(tickers):
+    """Enrich stock data with company information, sector, market cap, etc."""
+    enriched_data = {}
+    
+    for ticker in tickers:
+        try:
+            # Get stock info from yfinance
+            stock = yf.Ticker(ticker)
+            info = stock.info
+            
+            # Extract key information
+            company_name = info.get('longName', info.get('shortName', ticker.split('.')[0]))
+            sector = info.get('sector', 'Unknown')
+            industry = info.get('industry', 'Unknown')
+            market_cap = info.get('marketCap', 0)
+            
+            # Convert market cap to crores (INR)
+            if market_cap:
+                market_cap_cr = market_cap / 10000000  # Convert to crores
+            else:
+                market_cap_cr = 0
+            
+            enriched_data[ticker] = {
+                'Company': company_name,
+                'Sector': sector,
+                'Industry': industry,
+                'Market_Cap_Cr': market_cap_cr,
+                'Market_Cap': market_cap
+            }
+            
+        except Exception as e:
+            logger.warning(f"Could not enrich data for {ticker}: {e}")
+            enriched_data[ticker] = {
+                'Company': ticker.split('.')[0],
+                'Sector': 'Unknown',
+                'Industry': 'Unknown',
+                'Market_Cap_Cr': 0,
+                'Market_Cap': 0
+            }
+    
+    return enriched_data
+
+def get_volume_data(tickers, start_date, end_date):
+    """Get volume data for volume filtering"""
+    try:
+        volume_data = {}
+        
+        for ticker in tickers:
+            try:
+                stock = yf.Ticker(ticker)
+                hist = stock.history(start=start_date, end=end_date, auto_adjust=True)
+                
+                if not hist.empty:
+                    # Calculate average daily volume and turnover
+                    avg_volume = hist['Volume'].mean()
+                    avg_turnover = (hist['Close'] * hist['Volume']).mean()
+                    
+                    volume_data[ticker] = {
+                        'Avg_Volume': avg_volume,
+                        'Avg_Turnover': avg_turnover,
+                        'Min_Volume': hist['Volume'].min(),
+                        'Max_Volume': hist['Volume'].max()
+                    }
+                else:
+                    volume_data[ticker] = {
+                        'Avg_Volume': 0,
+                        'Avg_Turnover': 0,
+                        'Min_Volume': 0,
+                        'Max_Volume': 0
+                    }
+                    
+            except Exception as e:
+                logger.warning(f"Could not get volume data for {ticker}: {e}")
+                volume_data[ticker] = {
+                    'Avg_Volume': 0,
+                    'Avg_Turnover': 0,
+                    'Min_Volume': 0,
+                    'Max_Volume': 0
+                }
+        
+        return volume_data
+        
+    except Exception as e:
+        logger.error(f"Error getting volume data: {e}")
+        return {}
 
 # ---------------- Helpers ----------------
 def now_local():
@@ -112,7 +248,7 @@ def load_universe():
     return universe
 
 def yf_download(tickers, start, end, batch=100):
-    """Optimized batch download with better error handling"""
+    """Optimized batch download with better error handling and volume data"""
     if not tickers:
         return pd.DataFrame()
     
@@ -205,7 +341,7 @@ def yf_download(tickers, start, end, batch=100):
     return result
 
 def compute_dates_idx(prices: pd.DataFrame, ref_date: pd.Timestamp):
-    """Compute date indices with safe timezone handling."""
+    """Compute date indices with proper NSE trading day calculations."""
     if prices.empty:
         raise ValueError("Price data is empty")
 
@@ -227,7 +363,7 @@ def compute_dates_idx(prices: pd.DataFrame, ref_date: pd.Timestamp):
 
     pos = available_dates.get_loc(ref_date)
 
-    # Ensure enough history exists
+    # Use proper trading day calculations
     min_needed = max(cfg["lookback_12m_days"], cfg["sma_window_days"], cfg["vol_window_days"])
     if pos < min_needed:
         raise ValueError(
@@ -241,9 +377,8 @@ def compute_dates_idx(prices: pd.DataFrame, ref_date: pd.Timestamp):
     idx_1m_back = max(0, pos - cfg.get("lookback_1m_days", 21))
     return idx_today, idx_6m, idx_12m, idx_1m_back
 
-
-def momentum_frame(prices: pd.DataFrame, ref_date: pd.Timestamp):
-    """Enhanced momentum calculation with better logic"""
+def momentum_frame(prices: pd.DataFrame, ref_date: pd.Timestamp, volume_data: dict = None, enriched_data: dict = None):
+    """Enhanced momentum calculation with volume filters and enriched data"""
     idx_today, idx_6m, idx_12m, idx_1m_back = compute_dates_idx(prices, ref_date)
     
     # Get price points
@@ -306,6 +441,42 @@ def momentum_frame(prices: pd.DataFrame, ref_date: pd.Timestamp):
         "SMA_200": sma_200
     })
     
+    # Apply volume filters if available
+    if volume_data:
+        volume_filtered = []
+        for ticker in df.index:
+            vol_info = volume_data.get(ticker, {})
+            avg_turnover = vol_info.get('Avg_Turnover', 0)
+            avg_volume = vol_info.get('Avg_Volume', 0)
+            
+            # Filter based on minimum turnover and volume
+            min_turnover_cr = cfg.get('min_avg_turnover_cr', 10.0) * 10000000  # Convert to actual value
+            min_volume = cfg.get('min_avg_volume', 10000)
+            
+            if avg_turnover >= min_turnover_cr and avg_volume >= min_volume:
+                volume_filtered.append(ticker)
+        
+        if volume_filtered:
+            df = df.loc[volume_filtered]
+            logger.info(f"Volume filtering applied: {len(df)} stocks passed volume criteria")
+    
+    # Add enriched data if available
+    if enriched_data:
+        for ticker in df.index:
+            if ticker in enriched_data:
+                ticker_info = enriched_data[ticker]
+                df.loc[ticker, 'Company'] = ticker_info.get('Company', ticker.split('.')[0])
+                df.loc[ticker, 'Sector'] = ticker_info.get('Sector', 'Unknown')
+                df.loc[ticker, 'Industry'] = ticker_info.get('Industry', 'Unknown')
+                df.loc[ticker, 'Market_Cap_Cr'] = ticker_info.get('Market_Cap_Cr', 0)
+                df.loc[ticker, 'Market_Cap'] = ticker_info.get('Market_Cap', 0)
+            else:
+                df.loc[ticker, 'Company'] = ticker.split('.')[0]
+                df.loc[ticker, 'Sector'] = 'Unknown'
+                df.loc[ticker, 'Industry'] = 'Unknown'
+                df.loc[ticker, 'Market_Cap_Cr'] = 0
+                df.loc[ticker, 'Market_Cap'] = 0
+    
     # Remove any remaining NaN or infinite values
     df = df.replace([np.inf, -np.inf], np.nan).dropna()
     
@@ -325,7 +496,7 @@ def momentum_frame(prices: pd.DataFrame, ref_date: pd.Timestamp):
     return df, ref_info
 
 def suggest_allocations(top_df: pd.DataFrame, capital: float, top_n: int):
-    """Enhanced allocation calculation with better logic"""
+    """Enhanced allocation calculation with better logic and proper CSV formatting"""
     if top_df.empty:
         return top_df
     
@@ -342,10 +513,19 @@ def suggest_allocations(top_df: pd.DataFrame, capital: float, top_n: int):
     total_invested = amt.sum()
     allocation_pct = (amt / total_invested * 100) if total_invested > 0 else 0
     
+    # Add required columns for CSV output
     top_df["Qty"] = qty
     top_df["Amount"] = amt
     top_df["Allocation(%)"] = allocation_pct
     top_df["Unutilized"] = alloc_per - amt
+    
+    # Add missing columns for complete CSV
+    if 'Company' not in top_df.columns:
+        top_df['Company'] = top_df.index.str.split('.').str[0]
+    if 'Sector' not in top_df.columns:
+        top_df['Sector'] = 'Unknown'
+    if 'Market_Cap_Cr' not in top_df.columns:
+        top_df['Market_Cap_Cr'] = 0
     
     return top_df
 
@@ -399,15 +579,19 @@ def run(
     price_cap: Optional[float] = Query(None, description="Maximum price per share in INR"),
     ref_date: Optional[str] = Query(None, description="Reference date YYYY-MM-DD (default: last trading day)"),
     min_momentum_score: Optional[float] = Query(None, description="Minimum momentum score filter"),
+    min_volume: Optional[float] = Query(None, description="Minimum average volume filter"),
+    min_turnover_cr: Optional[float] = Query(None, description="Minimum average turnover in crores"),
 ):
     """
-    Run momentum strategy analysis with enhanced features
+    Run momentum strategy analysis with enhanced features including volume filters and data enrichment
     """
     try:
         # Validate and set parameters
         _capital = capital if capital is not None else cfg["capital"]
         _top_n = top_n if top_n is not None else cfg["top_n"]
         _cap = price_cap if price_cap is not None else cfg.get("price_cap")
+        _min_volume = min_volume if min_volume is not None else cfg.get("min_avg_volume", 10000)
+        _min_turnover_cr = min_turnover_cr if min_turnover_cr is not None else cfg.get("min_avg_turnover_cr", 10.0)
         out_dir = cfg["output_dir"]
         
         # Parse reference date
@@ -421,14 +605,23 @@ def run(
         
         # Load universe and download data
         universe = load_universe()
+        
+        # Use proper trading day calculations
         start_dt = end_dt - pd.Timedelta(days=cfg["history_days"])
+        
+        # Get enriched data and volume data
+        logger.info("Enriching stock data with company information...")
+        enriched_data = enrich_stock_data(universe)
+        
+        logger.info("Getting volume data for filtering...")
+        volume_data = get_volume_data(universe, start_dt, end_dt)
         
         prices = yf_download(universe, start_dt, end_dt)
         if prices.empty:
             raise HTTPException(status_code=500, detail="No price data downloaded")
         
-        # Calculate momentum metrics
-        mom_df, ref_info = momentum_frame(prices, end_dt)
+        # Calculate momentum metrics with enriched data and volume filters
+        mom_df, ref_info = momentum_frame(prices, end_dt, volume_data, enriched_data)
         
         if mom_df.empty:
             raise HTTPException(status_code=500, detail="No valid momentum data calculated")
@@ -447,6 +640,21 @@ def run(
         # Apply minimum momentum score filter
         if min_momentum_score is not None:
             eligible = eligible[eligible["MomentumScore"] >= min_momentum_score]
+        
+        # Apply volume filters
+        if volume_data:
+            volume_filtered = []
+            for ticker in eligible.index:
+                vol_info = volume_data.get(ticker, {})
+                avg_turnover = vol_info.get('Avg_Turnover', 0)
+                avg_volume = vol_info.get('Avg_Volume', 0)
+                
+                if avg_turnover >= (_min_turnover_cr * 10000000) and avg_volume >= _min_volume:
+                    volume_filtered.append(ticker)
+            
+            if volume_filtered:
+                eligible = eligible.loc[volume_filtered]
+                logger.info(f"Volume filtering applied: {len(eligible)} stocks passed volume criteria")
         
         # Rank by momentum score
         ranked = eligible.sort_values("MomentumScore", ascending=False).copy()
@@ -473,21 +681,73 @@ def run(
                 "positive_6m": True,
                 "positive_12m_ex1": True,
                 "price_cap": _cap,
-                "min_momentum_score": min_momentum_score
+                "min_momentum_score": min_momentum_score,
+                "min_volume": _min_volume,
+                "min_turnover_cr": _min_turnover_cr
             }
         }
         
-        # Save CSV files
+        # Save CSV files with proper formatting
         csv_paths = {}
         if cfg.get("write_csv", True):
             timestamp = end_dt.strftime("%Y%m%d")
             
+            # Save prices snapshot
             prices.to_csv(os.path.join(out_dir, f"prices_snapshot_{timestamp}.csv"))
-            mom_df.to_csv(os.path.join(out_dir, f"momentum_scores_{timestamp}.csv"))
-            eligible.to_csv(os.path.join(out_dir, f"eligible_stocks_{timestamp}.csv"))
             
+            # Save momentum scores with enriched data
+            momentum_csv = mom_df.copy()
+            if enriched_data:
+                for ticker in momentum_csv.index:
+                    if ticker in enriched_data:
+                        ticker_info = enriched_data[ticker]
+                        momentum_csv.loc[ticker, 'Company'] = ticker_info.get('Company', ticker.split('.')[0])
+                        momentum_csv.loc[ticker, 'Sector'] = ticker_info.get('Sector', 'Unknown')
+                        momentum_csv.loc[ticker, 'Market_Cap_Cr'] = ticker_info.get('Market_Cap_Cr', 0)
+            
+            momentum_csv.to_csv(os.path.join(out_dir, f"momentum_scores_{timestamp}.csv"))
+            
+            # Save eligible stocks with enriched data
+            eligible_csv = eligible.copy()
+            if enriched_data:
+                for ticker in eligible_csv.index:
+                    if ticker in enriched_data:
+                        ticker_info = enriched_data[ticker]
+                        eligible_csv.loc[ticker, 'Company'] = ticker_info.get('Company', ticker.split('.')[0])
+                        eligible_csv.loc[ticker, 'Sector'] = ticker_info.get('Sector', 'Unknown')
+                        eligible_csv.loc[ticker, 'Market_Cap_Cr'] = ticker_info.get('Market_Cap_Cr', 0)
+            
+            eligible_csv.to_csv(os.path.join(out_dir, f"eligible_stocks_{timestamp}.csv"))
+            
+            # Save top selection with complete data
             if not top.empty:
-                top.to_csv(os.path.join(out_dir, f"top_selection_{timestamp}.csv"), index=True)
+                # Create final CSV with all required columns
+                final_csv = top.copy()
+                
+                # Ensure all required columns exist
+                required_columns = [
+                    'Rank', 'Price', '6M_Return(%)', '12M_ex1_Return(%)', 
+                    'Volatility(%)', 'MomentumScore', 'Above_200DMA', 
+                    'Positive_6M', 'Positive_12M_ex1', 'SMA_200',
+                    'Company', 'Sector', 'Market_Cap_Cr', 'Qty', 'Amount', 
+                    'Allocation(%)', 'Unutilized'
+                ]
+                
+                for col in required_columns:
+                    if col not in final_csv.columns:
+                        if col == 'Company':
+                            final_csv[col] = final_csv.index.str.split('.').str[0]
+                        elif col == 'Sector':
+                            final_csv[col] = 'Unknown'
+                        elif col == 'Market_Cap_Cr':
+                            final_csv[col] = 0
+                        else:
+                            final_csv[col] = 0
+                
+                # Reorder columns for better readability
+                final_csv = final_csv[required_columns]
+                
+                final_csv.to_csv(os.path.join(out_dir, f"top_selection_{timestamp}.csv"), index=True)
             
             # Save reference info
             ref_df = pd.DataFrame([ref_info])
