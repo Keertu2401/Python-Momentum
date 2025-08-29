@@ -41,4 +41,7 @@ max_fill_days: 5         # Max days to forward fill missing data
 download_batch_size: 100 # Tickers per batch for yfinance
 max_retries: 3          # Retry attempts for failed downloads
 request_delay: 0.1      # Delay between requests (seconds)
+
+# Volume Filters
 min_avg_turnover_cr: 10.0   # require ₹10 Cr average daily turnover over last 60 sessions
+min_avg_volume: 10000       # Minimum average daily volume
