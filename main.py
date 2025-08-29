@@ -541,6 +541,34 @@ class LevelsResponse(BaseModel):
     levels: List[LevelData]
 
 # ---------------- API Endpoints ----------------
+@app.get("/")
+def root():
+    """Root endpoint with API information"""
+    return {
+        "message": "Momentum Strategy API v2.1.0",
+        "description": "Enhanced momentum trading strategy with T+1 settlement and trading-day alignment",
+        "endpoints": {
+            "health": "/health",
+            "run_strategy": "/run",
+            "get_levels": "/levels", 
+            "market_status": "/market-status",
+            "trading_calendar": "/trading-calendar",
+            "webhook_rebalance": "/webhook/rebalance",
+            "portfolio_compare": "/webhook/portfolio-compare",
+            "validate_orders": "/webhook/validate-orders"
+        },
+        "documentation": "/docs",
+        "features": [
+            "T+1 settlement awareness",
+            "Trading-day aligned lookbacks", 
+            "NSE holiday calendar integration",
+            "Liquidity filtering",
+            "Enhanced risk management"
+        ],
+        "status": "live",
+        "timestamp": datetime.now(gettz(cfg.get("tz", "Asia/Kolkata"))).isoformat()
+    }
+
 @app.get("/health")
 def health():
     """Health check endpoint"""
