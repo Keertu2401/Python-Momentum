@@ -246,11 +246,20 @@ def momentum_frame(prices: pd.DataFrame, ref_date: pd.Timestamp):
     """Enhanced momentum calculation with better logic"""
     idx_today, idx_6m, idx_12m, idx_1m_back = compute_dates_idx(prices, ref_date)
     
-    # Get price points
-    today = prices.iloc[idx_today]
-    sixm = prices.iloc[idx_6m]
-    twlv = prices.iloc[idx_12m]
-    one_m = prices.iloc[idx_1m_back]
+    # Get yesterday's close instead of today
+idx_yesterday = idx_today - 1
+if idx_yesterday < 0:
+    raise ValueError("Insufficient history: cannot go back one day for signal")
+
+yesterday = prices.iloc[idx_yesterday]
+
+# Now use yesterday's data for signal decisions
+sixm = prices.iloc[idx_6m]
+twlv = prices.iloc[idx_12m]
+one_m = prices.iloc[idx_1m_back]
+
+# But keep today's price for final output (e.g., "Price" field)
+today_price = prices.iloc[idx_today]
     
     # Find tickers with complete data across all time points
     valid_mask = (
@@ -295,10 +304,10 @@ def momentum_frame(prices: pd.DataFrame, ref_date: pd.Timestamp):
     
     # Create results DataFrame
     df = pd.DataFrame({
-        "Price": today[valid],
-        "6M_Return(%)": ret_6m,
-        "12M_ex1_Return(%)": ret_12m_ex1,
-        "Volatility(%)": vol,
+    "Price": today_price[valid],  # This is still today's price (for display)
+    "6M_Return(%)": ((yesterday[valid] / sixm[valid]) - 1.0) * 100,
+    "12M_ex1_Return(%)": ((one_m[valid] / twlv[valid]) - 1.0) * 100,
+    "Volatility(%)": vol,
         "MomentumScore": momentum_score,
         "Above_200DMA": above_200dma,
         "Positive_6M": ret_6m > 0,
