@@ -1,11 +1,5 @@
 # main.py
-# FastAPI momentum service — India-market safe + flexible universe loading
-# - Signals at t-1 (T+1 entry)
-# - Trading-day aligned lookbacks
-# - True 12-1 return
-# - Corporate-action anomaly guard
-# - Optional liquidity / turnover filter (₹ Cr)
-# - Universe can come from: query ?universe=..., query ?universe_url=..., ENV UNIVERSE_URL, or config.yaml (URL or local CSV)
+# FastAPI momentum service — India-safe + flexible universe + robust errors
 
 import os
 import math
@@ -18,7 +12,8 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 import yaml
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 # ------------ Logging ------------
@@ -31,7 +26,7 @@ DEFAULT_CFG = {
     "capital": 1000000.0,
     "top_n": 10,
     "price_cap": None,
-    "universe_source": "ind_nifty500list.csv",  # can be local filename OR https URL
+    "universe_source": "ind_nifty500list.csv",  # URL or local CSV; can be overridden by query/env
     "history_days": 900,
     "lookback_6m_days": 126,
     "lookback_12m_days": 252,
@@ -65,9 +60,48 @@ cfg = load_config()
 # ------------ FastAPI app ------------
 app = FastAPI(
     title="Momentum Strategy (India-safe)",
-    description="Momentum selection with T+1 safety, trading-day windows, 12-1 return, liquidity filtering, and flexible universe input.",
-    version="1.2.0",
+    description="Momentum selection with T+1 safety, trading-day windows, 12-1 return, liquidity filtering, flexible universe, and robust error reporting.",
+    version="1.3.0",
 )
+
+# ------------ Middleware & global error handlers ------------
+@app.middleware("http")
+async def add_request_logging(request: Request, call_next):
+    try:
+        response = await call_next(request)
+        return response
+    except Exception as e:
+        log.exception("Unhandled error processing %s %s", request.method, request.url.path)
+        # Fall-through to global handler below (FastAPI will re-raise), but just in case:
+        return JSONResponse(
+            status_code=500,
+            content={"error": "internal_error", "message": str(e), "path": request.url.path},
+        )
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    # Pass through structured HTTP errors with path info (great for n8n)
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "error": "http_error",
+            "status_code": exc.status_code,
+            "message": exc.detail if isinstance(exc.detail, str) else str(exc.detail),
+            "path": request.url.path,
+        },
+    )
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    log.exception("Unhandled exception at %s", request.url.path)
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": "internal_error",
+            "message": str(exc),
+            "path": request.url.path,
+        },
+    )
 
 # ------------ Time helpers ------------
 def now_local() -> datetime:
@@ -88,7 +122,6 @@ def _normalize_symbol(raw: str) -> Optional[str]:
     return s
 
 def _read_csv_anywhere(path_or_url: str) -> pd.DataFrame:
-    # pandas can read https:// and local paths the same way
     try:
         df = pd.read_csv(path_or_url)
         if df is None or df.empty:
@@ -104,7 +137,7 @@ def _universe_from_csv_df(df: pd.DataFrame) -> List[str]:
             col = c
             break
     if col is None:
-        col = df.columns[0]  # last resort
+        col = df.columns[0]
     symbols = []
     for raw in df[col].tolist():
         norm = _normalize_symbol(raw)
@@ -120,10 +153,9 @@ def resolve_universe(universe_inline: Optional[str], universe_url: Optional[str]
     Precedence:
       1) ?universe=RELIANCE.NS,HDFCBANK.NS (comma-separated)
       2) ?universe_url=https://...  (or ENV UNIVERSE_URL)
-      3) config.yaml: universe_source (supports https URL or local CSV filename)
+      3) config.yaml: universe_source (URL or local CSV)
       4) local fallbacks (ind_nifty500list.csv, nse_universe.csv, universe.csv)
     """
-    # 1) Direct inline query param
     if universe_inline:
         syms = [_normalize_symbol(x) for x in universe_inline.split(",")]
         syms = [s for s in syms if s]
@@ -131,13 +163,11 @@ def resolve_universe(universe_inline: Optional[str], universe_url: Optional[str]
             raise HTTPException(status_code=400, detail="Provided 'universe' param is empty after parsing.")
         return sorted(set(syms))
 
-    # 2) URL via query param or ENV
     url = universe_url or os.getenv("UNIVERSE_URL", "").strip()
     if url:
         df = _read_csv_anywhere(url)
         return _universe_from_csv_df(df)
 
-    # 3) Config source (URL or local file)
     src = str(cfg.get("universe_source", "")).strip()
     if src:
         if src.lower().startswith("http://") or src.lower().startswith("https://"):
@@ -147,7 +177,6 @@ def resolve_universe(universe_inline: Optional[str], universe_url: Optional[str]
             df = _read_csv_anywhere(src)
             return _universe_from_csv_df(df)
 
-    # 4) Local fallbacks
     for fn in ["ind_nifty500list.csv", "nse_universe.csv", "universe.csv"]:
         if os.path.exists(fn):
             df = _read_csv_anywhere(fn)
@@ -159,8 +188,7 @@ def resolve_universe(universe_inline: Optional[str], universe_url: Optional[str]
             "Universe source not found. Provide one of: "
             "query param 'universe' (comma-separated), "
             "query param 'universe_url' (CSV), "
-            "ENV UNIVERSE_URL, or a valid 'universe_source' in config.yaml "
-            "(HTTPS URL or a committed CSV file)."
+            "ENV UNIVERSE_URL, or a valid 'universe_source' in config.yaml."
         ),
     )
 
@@ -320,7 +348,7 @@ def compute_momentum_frame_india(
     ret_12m_ex1 = (p_1m / p_12m) - 1.0
 
     daily_ret = adj_close.pct_change()
-    vol = daily_ret.iloc[signal_pos - (vol_window_days - 1): signal_pos + 1].std() * math.sqrt(246)
+    vol = daily_ret.iloc[signal_pos - (vol_window_days - 1): signal_pos + 1].std() * math.sqrt(TRADING_DAYS_PER_YEAR)
 
     sma200_series = adj_close.rolling(window=sma_window_days, min_periods=sma_window_days).mean().iloc[signal_pos]
     above_200dma = p_signal > sma200_series
@@ -359,7 +387,7 @@ def compute_momentum_frame_india(
         "lb_1m_days": lookback_1m_days,
         "sma_window_days": sma_window_days,
         "vol_window_days": vol_window_days,
-        "trading_days_per_year": 246,
+        "trading_days_per_year": TRADING_DAYS_PER_YEAR,
     }
     return mom_df, reference
 
@@ -401,6 +429,10 @@ class RunResponse(BaseModel):
     stocks: List[StockData]
     summary: Dict[str, float]
     csv_paths: Optional[Dict[str, str]] = None
+    # present only when debug=1
+    suspects: Optional[List[str]] = None
+    safe_ref_date: Optional[str] = None
+    universe_count: Optional[int] = None
 
 class LevelData(BaseModel):
     ticker: str
@@ -429,129 +461,153 @@ def run_strategy(
     min_momentum_score: Optional[float] = Query(None, description="Optional floor on score"),
     universe: Optional[str] = Query(None, description="Comma-separated tickers (e.g., RELIANCE.NS,HDFCBANK.NS)"),
     universe_url: Optional[str] = Query(None, description="HTTPS CSV with a 'Symbol' column or similar"),
+    debug: Optional[int] = Query(0, description="Set to 1 to return diagnostic fields"),
 ):
-    _capital = float(capital) if capital is not None else float(cfg["capital"])
-    _top_n = int(top_n) if top_n is not None else int(cfg["top_n"])
-    if _top_n <= 0 or _top_n > 50:
-        raise HTTPException(status_code=400, detail="top_n must be between 1 and 50.")
+    try:
+        _capital = float(capital) if capital is not None else float(cfg["capital"])
+        _top_n = int(top_n) if top_n is not None else int(cfg["top_n"])
+        if _top_n <= 0 or _top_n > 50:
+            raise HTTPException(status_code=400, detail="top_n must be between 1 and 50.")
 
-    # 1) Universe (now flexible)
-    tickers = resolve_universe(universe_inline=universe, universe_url=universe_url)
+        # 1) Universe (flexible)
+        tickers = resolve_universe(universe_inline=universe, universe_url=universe_url)
+        if len(tickers) == 0:
+            raise HTTPException(status_code=400, detail="Universe resolved to 0 tickers.")
 
-    # 2) Date range (wide enough for all windows)
-    end_dt = pd.Timestamp(ref_date) if ref_date else pd.Timestamp(now_local().date())
-    start_dt = end_dt - timedelta(days=int(cfg["history_days"]))
+        # 2) Date range (wide enough for all windows)
+        end_dt = pd.Timestamp(ref_date) if ref_date else pd.Timestamp(now_local().date())
+        start_dt = end_dt - timedelta(days=int(cfg["history_days"]))
 
-    # 3) Download (Adj Close, Close, Volume) + actions
-    adj_close, close, volume, splits_map, _ = yf_download_full(tickers, start=start_dt, end=end_dt + timedelta(days=1))
-    if adj_close.empty:
-        raise HTTPException(status_code=500, detail="No price data downloaded.")
+        # 3) Download (Adj Close, Close, Volume) + actions
+        adj_close, close, volume, splits_map, _ = yf_download_full(tickers, start=start_dt, end=end_dt + timedelta(days=1))
+        if adj_close.empty:
+            raise HTTPException(status_code=500, detail="No price data downloaded (yfinance returned empty).")
 
-    # 4) Resolve safe reference date from actual trading sessions
-    safe_ref_date = resolve_ref_date_from_prices(adj_close, requested_ref_date=end_dt)
+        # 4) Resolve safe reference date from actual trading sessions
+        safe_ref_date = resolve_ref_date_from_prices(adj_close, requested_ref_date=end_dt)
 
-    # 5) Corporate action anomaly guard
-    suspects = detect_corporate_action_anomalies(adj_close, close, splits_map)
-    if suspects:
-        log.warning("Dropping suspected mis-adjusted tickers: %s", ", ".join(suspects))
-        adj_close = adj_close.drop(columns=[c for c in suspects if c in adj_close.columns], errors="ignore")
-        close = close.drop(columns=[c for c in suspects if c in close.columns], errors="ignore")
-        volume = volume.drop(columns=[c for c in suspects if c in volume.columns], errors="ignore")
-    if adj_close.empty:
-        raise HTTPException(status_code=500, detail="All tickers filtered by anomaly guard. Check data source.")
+        # 5) Corporate action anomaly guard
+        suspects = detect_corporate_action_anomalies(adj_close, close, splits_map)
+        if suspects:
+            log.warning("Dropping suspected mis-adjusted tickers: %s", ", ".join(suspects))
+            adj_close = adj_close.drop(columns=[c for c in suspects if c in adj_close.columns], errors="ignore")
+            close = close.drop(columns=[c for c in suspects if c in close.columns], errors="ignore")
+            volume = volume.drop(columns=[c for c in suspects if c in volume.columns], errors="ignore")
+        if adj_close.empty:
+            raise HTTPException(status_code=500, detail="All tickers filtered by anomaly guard. Check data source.")
 
-    # 6) Momentum frame (India-safe)
-    mom_df, ref_info = compute_momentum_frame_india(
-        adj_close=adj_close,
-        close=close,
-        volume=volume,
-        ref_date=safe_ref_date,
-        lookback_6m_days=int(cfg["lookback_6m_days"]),
-        lookback_12m_days=int(cfg["lookback_12m_days"]),
-        lookback_1m_days=int(cfg["lookback_1m_days"]),
-        sma_window_days=int(cfg["sma_window_days"]),
-        vol_window_days=int(cfg["vol_window_days"]),
-        min_avg_turnover_cr=(float(cfg["min_avg_turnover_cr"]) if cfg.get("min_avg_turnover_cr") is not None else None),
-        price_cap=(float(price_cap) if price_cap is not None else None),
-    )
-    if mom_df.empty:
-        raise HTTPException(status_code=404, detail="No eligible stocks after filters.")
-
-    if min_momentum_score is not None:
-        mom_df = mom_df[mom_df["MomentumScore"] >= float(min_momentum_score)]
+        # 6) Momentum frame (India-safe)
+        mom_df, ref_info = compute_momentum_frame_india(
+            adj_close=adj_close,
+            close=close,
+            volume=volume,
+            ref_date=safe_ref_date,
+            lookback_6m_days=int(cfg["lookback_6m_days"]),
+            lookback_12m_days=int(cfg["lookback_12m_days"]),
+            lookback_1m_days=int(cfg["lookback_1m_days"]),
+            sma_window_days=int(cfg["sma_window_days"]),
+            vol_window_days=int(cfg["vol_window_days"]),
+            min_avg_turnover_cr=(float(cfg["min_avg_turnover_cr"]) if cfg.get("min_avg_turnover_cr") is not None else None),
+            price_cap=(float(price_cap) if price_cap is not None else None),
+        )
         if mom_df.empty:
-            raise HTTPException(status_code=404, detail="No stocks meet the minimum momentum score.")
+            raise HTTPException(status_code=404, detail="No eligible stocks after filters.")
 
-    # 7) Rank, pick top N, allocate
-    top_n_used = min(_top_n, len(mom_df))
-    top_df = mom_df.head(top_n_used).copy()
-    alloc_df = suggest_allocations(top_df, _capital, top_n_used)
-    alloc_df["Rank"] = np.arange(1, len(alloc_df) + 1)
+        if min_momentum_score is not None:
+            mom_df = mom_df[mom_df["MomentumScore"] >= float(min_momentum_score)]
+            if mom_df.empty:
+                raise HTTPException(status_code=404, detail="No stocks meet the minimum momentum score.")
 
-    # 8) Build response stocks
-    stocks = []
-    joined = top_df.join(alloc_df.set_index("Ticker"), how="left")
-    for t, r in joined.iterrows():
-        stocks.append(StockData(
-            ticker=t,
-            rank=int(r.get("Rank", 0)),
-            price=float(r["Price"]),
-            qty=int(r.get("Qty", 0)),
-            amount=float(r.get("Amount", 0.0)),
-            allocation_pct=float(r.get("AllocationPct", 0.0)),
-            momentum_score=float(r["MomentumScore"]),
-            ret_6m=float(r["Ret_6M"]),
-            ret_12m_ex1=float(r["Ret_12M_ex1"]),
-            vol_ann=float(r["Vol_Ann"]),
-            above_200dma=bool(r["Above_200DMA"]),
-        ))
+        # 7) Rank, pick top N, allocate
+        top_n_used = min(_top_n, len(mom_df))
+        top_df = mom_df.head(top_n_used).copy()
+        alloc_df = suggest_allocations(top_df, _capital, top_n_used)
+        alloc_df["Rank"] = np.arange(1, len(alloc_df) + 1)
 
-    # 9) CSV outputs (optional)
-    csv_paths = {}
-    if cfg.get("write_csv", True):
-        stamp = ref_info["signal_date"]
-        outdir = cfg["output_dir"]
-        os.makedirs(outdir, exist_ok=True)
-        prices_path = os.path.join(outdir, f"prices_adjclose_{stamp}.csv")
-        scores_path = os.path.join(outdir, f"momentum_scores_{stamp}.csv")
-        eligible_path = os.path.join(outdir, f"eligible_{stamp}.csv")
-        top_path = os.path.join(outdir, f"top_selection_{stamp}.csv")
-        ref_path = os.path.join(outdir, f"reference_{stamp}.csv")
+        # 8) Build response stocks
+        stocks = []
+        joined = top_df.join(alloc_df.set_index("Ticker"), how="left")
+        for t, r in joined.iterrows():
+            stocks.append(StockData(
+                ticker=t,
+                rank=int(r.get("Rank", 0)),
+                price=float(r["Price"]),
+                qty=int(r.get("Qty", 0)),
+                amount=float(r.get("Amount", 0.0)),
+                allocation_pct=float(r.get("AllocationPct", 0.0)),
+                momentum_score=float(r["MomentumScore"]),
+                ret_6m=float(r["Ret_6M"]),
+                ret_12m_ex1=float(r["Ret_12M_ex1"]),
+                vol_ann=float(r["Vol_Ann"]),
+                above_200dma=bool(r["Above_200DMA"]),
+            ))
 
-        try:
-            adj_close.to_csv(prices_path)
-            mom_df.to_csv(scores_path)
-            mom_df.index.to_series().to_frame("Ticker").to_csv(eligible_path, index=False)
-            pd.DataFrame([s.dict() for s in stocks]).to_csv(top_path, index=False)
-            pd.DataFrame([ref_info]).to_csv(ref_path, index=False)
-            csv_paths = {
-                "prices_adjclose": prices_path,
-                "momentum_scores": scores_path,
-                "eligible": eligible_path,
-                "top_selection": top_path,
-                "reference": ref_path,
-            }
-        except Exception as e:
-            log.warning("CSV write failed: %s", e)
+        # 9) CSV outputs (optional)
+        csv_paths = {}
+        if cfg.get("write_csv", True):
+            stamp = ref_info["signal_date"]
+            outdir = cfg["output_dir"]
+            os.makedirs(outdir, exist_ok=True)
+            prices_path = os.path.join(outdir, f"prices_adjclose_{stamp}.csv")
+            scores_path = os.path.join(outdir, f"momentum_scores_{stamp}.csv")
+            eligible_path = os.path.join(outdir, f"eligible_{stamp}.csv")
+            top_path = os.path.join(outdir, f"top_selection_{stamp}.csv")
+            ref_path = os.path.join(outdir, f"reference_{stamp}.csv")
 
-    total_amount = sum(s.amount for s in stocks)
-    utilization_pct = (total_amount / _capital) * 100.0 if _capital > 0 else 0.0
-    summary = {
-        "capital": _capital,
-        "utilization_pct": round(utilization_pct, 2),
-        "avg_momentum_score": float(np.mean([s.momentum_score for s in stocks])) if stocks else 0.0,
-    }
+            try:
+                adj_close.to_csv(prices_path)
+                mom_df.to_csv(scores_path)
+                mom_df.index.to_series().to_frame("Ticker").to_csv(eligible_path, index=False)
+                pd.DataFrame([s.dict() for s in stocks]).to_csv(top_path, index=False)
+                pd.DataFrame([ref_info]).to_csv(ref_path, index=False)
+                csv_paths = {
+                    "prices_adjclose": prices_path,
+                    "momentum_scores": scores_path,
+                    "eligible": eligible_path,
+                    "top_selection": top_path,
+                    "reference": ref_path,
+                }
+            except Exception as e:
+                log.warning("CSV write failed: %s", e)
 
-    return RunResponse(
-        reference=ref_info,
-        eligible_count=int(len(mom_df)),
-        selected_count=int(len(stocks)),
-        stocks=stocks,
-        summary=summary,
-        csv_paths=csv_paths or None
-    )
+        total_amount = sum(s.amount for s in stocks)
+        utilization_pct = (total_amount / _capital) * 100.0 if _capital > 0 else 0.0
+        summary = {
+            "capital": _capital,
+            "utilization_pct": round(utilization_pct, 2),
+            "avg_momentum_score": float(np.mean([s.momentum_score for s in stocks])) if stocks else 0.0,
+        }
+
+        # baseline response
+        resp = RunResponse(
+            reference=ref_info,
+            eligible_count=int(len(mom_df)),
+            selected_count=int(len(stocks)),
+            stocks=stocks,
+            summary=summary,
+            csv_paths=csv_paths or None
+        )
+
+        # include diagnostics if debug=1
+        if int(debug or 0) == 1:
+            resp.suspects = suspects
+            resp.safe_ref_date = str(safe_ref_date.date())
+            resp.universe_count = len(tickers)
+
+        return resp
+
+    except HTTPException:
+        # re-raise for our structured HTTP handler
+        raise
+    except Exception as e:
+        log.exception("Unhandled error in /run")
+        raise HTTPException(status_code=500, detail=f"Internal error in /run: {e}")
 
 # ------------ /levels (ATR) ------------
+class LevelsResponse(BaseModel):
+    as_of: str
+    levels: List['LevelData']  # forward ref used above
+
 @app.get("/levels", response_model=LevelsResponse)
 def levels(tickers: str = Query(..., description="Comma-separated tickers (e.g., BEL.NS,MFSL.NS)")):
     syms = [t.strip().upper() for t in tickers.split(",") if t.strip()]
@@ -586,13 +642,19 @@ def levels(tickers: str = Query(..., description="Comma-separated tickers (e.g.,
                 stop_1_5atr=last_close - 1.5*atr,
                 target_2atr=last_close + 2*atr,
             ))
-        except Exception:
+        except Exception as e:
+            log.warning("Levels calc failed for %s: %s", t, e)
             continue
 
     if not out:
         raise HTTPException(status_code=404, detail="No levels computed (insufficient data).")
 
     return LevelsResponse(as_of=str(end_dt.date()), levels=out)
+
+# ------------ Pydantic forward refs fix ------------
+from pydantic import Field  # noqa: E402
+StockData.update_forward_refs()
+LevelsResponse.update_forward_refs()
 
 # ------------ Main ------------
 if __name__ == "__main__":
