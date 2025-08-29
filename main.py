@@ -1,16 +1,17 @@
 # main.py
-# FastAPI momentum service — India-market safe version
+# FastAPI momentum service — India-market safe + flexible universe loading
 # - Signals at t-1 (T+1 entry)
 # - Trading-day aligned lookbacks
 # - True 12-1 return
 # - Corporate-action anomaly guard
 # - Optional liquidity / turnover filter (₹ Cr)
+# - Universe can come from: query ?universe=..., query ?universe_url=..., ENV UNIVERSE_URL, or config.yaml (URL or local CSV)
 
 import os
 import math
 import logging
 from typing import List, Dict, Tuple, Optional
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -30,8 +31,8 @@ DEFAULT_CFG = {
     "capital": 1000000.0,
     "top_n": 10,
     "price_cap": None,
-    "universe_source": "ind_nifty500list.csv",  # fallback local csv ok
-    "history_days": 900,  # ensure enough for 252+200 windows
+    "universe_source": "ind_nifty500list.csv",  # can be local filename OR https URL
+    "history_days": 900,
     "lookback_6m_days": 126,
     "lookback_12m_days": 252,
     "lookback_1m_days": 21,
@@ -46,7 +47,9 @@ DEFAULT_CFG = {
 def load_config() -> dict:
     if not os.path.exists(CFG_PATH):
         log.warning("config.yaml not found — using defaults.")
-        return DEFAULT_CFG.copy()
+        cfg = DEFAULT_CFG.copy()
+        os.makedirs(cfg["output_dir"], exist_ok=True)
+        return cfg
     try:
         with open(CFG_PATH, "r", encoding="utf-8") as f:
             user_cfg = yaml.safe_load(f) or {}
@@ -62,8 +65,8 @@ cfg = load_config()
 # ------------ FastAPI app ------------
 app = FastAPI(
     title="Momentum Strategy (India-safe)",
-    description="Momentum selection with T+1 safety, trading-day windows, 12-1 return, and liquidity filtering.",
-    version="1.1.0",
+    description="Momentum selection with T+1 safety, trading-day windows, 12-1 return, liquidity filtering, and flexible universe input.",
+    version="1.2.0",
 )
 
 # ------------ Time helpers ------------
@@ -76,40 +79,90 @@ POSSIBLE_TICKER_COLS = [
     "Symbol","SYMBOL","symbol","Ticker","TICKER","ticker","NSE Symbol","NSE_SYMBOL","nse_symbol"
 ]
 
-def load_universe() -> List[str]:
-    src = cfg["universe_source"]
-    if src and os.path.exists(src):
-        df = pd.read_csv(src)
-    else:
-        # Try a few sane local fallbacks
-        for fn in ["ind_nifty500list.csv", "nse_universe.csv", "universe.csv"]:
-            if os.path.exists(fn):
-                df = pd.read_csv(fn)
-                break
-        else:
-            raise HTTPException(status_code=500, detail="Universe source not found (check config or provide CSV).")
+def _normalize_symbol(raw: str) -> Optional[str]:
+    s = str(raw or "").strip().upper()
+    if not s:
+        return None
+    if not s.endswith(".NS") and not s.endswith(".BSE"):
+        s = s + ".NS"
+    return s
 
+def _read_csv_anywhere(path_or_url: str) -> pd.DataFrame:
+    # pandas can read https:// and local paths the same way
+    try:
+        df = pd.read_csv(path_or_url)
+        if df is None or df.empty:
+            raise ValueError("CSV is empty.")
+        return df
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read universe CSV from '{path_or_url}': {e}")
+
+def _universe_from_csv_df(df: pd.DataFrame) -> List[str]:
     col = None
     for c in POSSIBLE_TICKER_COLS:
         if c in df.columns:
             col = c
             break
     if col is None:
-        # try first column as last resort
-        col = df.columns[0]
+        col = df.columns[0]  # last resort
+    symbols = []
+    for raw in df[col].tolist():
+        norm = _normalize_symbol(raw)
+        if norm:
+            symbols.append(norm)
+    symbols = sorted(set(symbols))
+    if not symbols:
+        raise HTTPException(status_code=500, detail="No valid tickers in universe CSV.")
+    return symbols
 
-    tickers = []
-    for raw in df[col].astype(str).tolist():
-        s = raw.strip().upper()
-        if not s:
-            continue
-        if not s.endswith(".NS") and not s.endswith(".BSE"):
-            s = s + ".NS"
-        tickers.append(s)
-    tickers = sorted(set(tickers))
-    if not tickers:
-        raise HTTPException(status_code=500, detail="No tickers found in universe file.")
-    return tickers
+def resolve_universe(universe_inline: Optional[str], universe_url: Optional[str]) -> List[str]:
+    """
+    Precedence:
+      1) ?universe=RELIANCE.NS,HDFCBANK.NS (comma-separated)
+      2) ?universe_url=https://...  (or ENV UNIVERSE_URL)
+      3) config.yaml: universe_source (supports https URL or local CSV filename)
+      4) local fallbacks (ind_nifty500list.csv, nse_universe.csv, universe.csv)
+    """
+    # 1) Direct inline query param
+    if universe_inline:
+        syms = [_normalize_symbol(x) for x in universe_inline.split(",")]
+        syms = [s for s in syms if s]
+        if not syms:
+            raise HTTPException(status_code=400, detail="Provided 'universe' param is empty after parsing.")
+        return sorted(set(syms))
+
+    # 2) URL via query param or ENV
+    url = universe_url or os.getenv("UNIVERSE_URL", "").strip()
+    if url:
+        df = _read_csv_anywhere(url)
+        return _universe_from_csv_df(df)
+
+    # 3) Config source (URL or local file)
+    src = str(cfg.get("universe_source", "")).strip()
+    if src:
+        if src.lower().startswith("http://") or src.lower().startswith("https://"):
+            df = _read_csv_anywhere(src)
+            return _universe_from_csv_df(df)
+        if os.path.exists(src):
+            df = _read_csv_anywhere(src)
+            return _universe_from_csv_df(df)
+
+    # 4) Local fallbacks
+    for fn in ["ind_nifty500list.csv", "nse_universe.csv", "universe.csv"]:
+        if os.path.exists(fn):
+            df = _read_csv_anywhere(fn)
+            return _universe_from_csv_df(df)
+
+    raise HTTPException(
+        status_code=500,
+        detail=(
+            "Universe source not found. Provide one of: "
+            "query param 'universe' (comma-separated), "
+            "query param 'universe_url' (CSV), "
+            "ENV UNIVERSE_URL, or a valid 'universe_source' in config.yaml "
+            "(HTTPS URL or a committed CSV file)."
+        ),
+    )
 
 # ------------ Data download & guards (India-safe) ------------
 TRADING_DAYS_PER_YEAR = 246  # ~244–248 typical for NSE/BSE
@@ -123,11 +176,6 @@ def yf_download_full(
     end: pd.Timestamp,
     batch: int = 80,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, Dict[str, pd.Series], Dict[str, pd.Series]]:
-    """
-    Robust downloader: returns (Adj Close, Close, Volume) aligned frames,
-    plus per-ticker Stock Splits & Dividends series.
-    Uses auto_adjust=False so we have both Close and Adj Close for checks.
-    """
     adj_frames, close_frames, vol_frames = [], [], []
     splits_map: Dict[str, pd.Series] = {}
     divs_map: Dict[str, pd.Series] = {}
@@ -179,7 +227,6 @@ def yf_download_full(
     close = pd.concat(close_frames, axis=1).reindex(adj_close.index).sort_index()
     volume = pd.concat(vol_frames, axis=1).reindex(adj_close.index).sort_index()
 
-    # Fill short gaps, filter low-coverage tickers
     adj_close = adj_close.ffill(limit=5)
     close = close.ffill(limit=5)
     volume = volume.fillna(0)
@@ -199,9 +246,6 @@ def detect_corporate_action_anomalies(
     max_abs_move_without_split: float = 0.40,
     ratio_jump_threshold: float = 0.10,
 ) -> List[str]:
-    """
-    Flag tickers where adjusted series looks inconsistent with recorded actions.
-    """
     if adj_close.empty:
         return []
     suspects: set = set()
@@ -212,7 +256,6 @@ def detect_corporate_action_anomalies(
             suspects.add(t)
             continue
 
-        # Big adjusted move with no split nearby
         big_dates = daily_ret.index[(daily_ret[t].abs() > max_abs_move_without_split)].tolist()
         for d in big_dates:
             split_near = False
@@ -224,7 +267,6 @@ def detect_corporate_action_anomalies(
                 suspects.add(t)
                 break
 
-        # Adj/Close ratio sanity jumps
         ratio = (adj_close[t] / close[t]).replace([np.inf, -np.inf], np.nan)
         if ratio.dropna().pct_change().abs().gt(ratio_jump_threshold).any():
             suspects.add(t)
@@ -238,7 +280,6 @@ def _loc_at_or_before(idx: pd.DatetimeIndex, when: pd.Timestamp) -> int:
     return pos
 
 def resolve_ref_date_from_prices(adj_close: pd.DataFrame, requested_ref_date: Optional[pd.Timestamp] = None) -> pd.Timestamp:
-    """Pick the last trading day at/ before requested date (or last index if None)."""
     if adj_close.empty:
         raise ValueError("No price data.")
     idx = adj_close.index
@@ -260,47 +301,32 @@ def compute_momentum_frame_india(
     min_avg_turnover_cr: Optional[float] = None,
     price_cap: Optional[float] = None,
 ) -> Tuple[pd.DataFrame, dict]:
-    """
-    Momentum table with India-safe logic:
-    - Signal at t-1 (entry on t)
-    - 6M = P(t-1)/P(t-126)-1
-    - 12-1 = P(t-21)/P(t-252)-1
-    - Vol over last 'vol_window_days' up to t-1, annualized by sqrt(246)
-    - SMA200 at t-1
-    - Optional liquidity filter by avg turnover (₹ Cr) over last 60 sessions up to t-1
-    """
     if adj_close.empty:
         raise ValueError("No price data.")
 
     idx = adj_close.index
     ref_pos = _loc_at_or_before(idx, pd.Timestamp(ref_date))
-    signal_pos = ref_pos - 1  # enforce T+1 (no using today's close)
+    signal_pos = ref_pos - 1  # enforce T+1
     need = max(lookback_12m_days, sma_window_days, vol_window_days) + 1
     if signal_pos < need:
         raise ValueError("Insufficient history for lookbacks at the requested date.")
 
-    # Prices for lookbacks (all trading-day aligned)
     p_signal = adj_close.iloc[signal_pos]                        # P(t-1)
     p_6m = adj_close.iloc[signal_pos - lookback_6m_days]         # P(t-126)
     p_12m = adj_close.iloc[signal_pos - lookback_12m_days]       # P(t-252)
     p_1m = adj_close.iloc[signal_pos - lookback_1m_days]         # P(t-21)
 
-    # Returns
     ret_6m = (p_signal / p_6m) - 1.0
-    ret_12m_ex1 = (p_1m / p_12m) - 1.0  # excludes last month
+    ret_12m_ex1 = (p_1m / p_12m) - 1.0
 
-    # Volatility to t-1
     daily_ret = adj_close.pct_change()
-    vol = daily_ret.iloc[signal_pos - (vol_window_days - 1): signal_pos + 1].std() * math.sqrt(TRADING_DAYS_PER_YEAR)
+    vol = daily_ret.iloc[signal_pos - (vol_window_days - 1): signal_pos + 1].std() * math.sqrt(246)
 
-    # SMA200 at t-1
     sma200_series = adj_close.rolling(window=sma_window_days, min_periods=sma_window_days).mean().iloc[signal_pos]
     above_200dma = p_signal > sma200_series
 
-    # Base filters
     filters = above_200dma & (ret_6m > 0) & (ret_12m_ex1 > 0)
 
-    # Liquidity: avg turnover (₹ Cr) last 60 sessions to t-1
     if min_avg_turnover_cr is not None:
         aligned_close = close.reindex(idx)
         aligned_volume = volume.reindex(idx)
@@ -310,7 +336,6 @@ def compute_momentum_frame_india(
     if price_cap is not None:
         filters = filters & (p_signal <= float(price_cap))
 
-    # Score
     risk_adj_vol = vol + 0.01
     momentum_score = (0.4 * ret_6m + 0.6 * ret_12m_ex1) / risk_adj_vol
 
@@ -334,7 +359,7 @@ def compute_momentum_frame_india(
         "lb_1m_days": lookback_1m_days,
         "sma_window_days": sma_window_days,
         "vol_window_days": vol_window_days,
-        "trading_days_per_year": TRADING_DAYS_PER_YEAR,
+        "trading_days_per_year": 246,
     }
     return mom_df, reference
 
@@ -402,23 +427,23 @@ def run_strategy(
     price_cap: Optional[float] = Query(None, description="Exclude stocks above this price"),
     ref_date: Optional[str] = Query(None, description="YYYY-MM-DD; if omitted uses last available session"),
     min_momentum_score: Optional[float] = Query(None, description="Optional floor on score"),
+    universe: Optional[str] = Query(None, description="Comma-separated tickers (e.g., RELIANCE.NS,HDFCBANK.NS)"),
+    universe_url: Optional[str] = Query(None, description="HTTPS CSV with a 'Symbol' column or similar"),
 ):
     _capital = float(capital) if capital is not None else float(cfg["capital"])
     _top_n = int(top_n) if top_n is not None else int(cfg["top_n"])
     if _top_n <= 0 or _top_n > 50:
         raise HTTPException(status_code=400, detail="top_n must be between 1 and 50.")
 
-    # 1) Universe
-    universe = load_universe()
-    if len(universe) == 0:
-        raise HTTPException(status_code=500, detail="Empty universe.")
+    # 1) Universe (now flexible)
+    tickers = resolve_universe(universe_inline=universe, universe_url=universe_url)
 
     # 2) Date range (wide enough for all windows)
     end_dt = pd.Timestamp(ref_date) if ref_date else pd.Timestamp(now_local().date())
     start_dt = end_dt - timedelta(days=int(cfg["history_days"]))
 
     # 3) Download (Adj Close, Close, Volume) + actions
-    adj_close, close, volume, splits_map, divs_map = yf_download_full(universe, start=start_dt, end=end_dt + timedelta(days=1))
+    adj_close, close, volume, splits_map, _ = yf_download_full(tickers, start=start_dt, end=end_dt + timedelta(days=1))
     if adj_close.empty:
         raise HTTPException(status_code=500, detail="No price data downloaded.")
 
@@ -452,7 +477,6 @@ def run_strategy(
     if mom_df.empty:
         raise HTTPException(status_code=404, detail="No eligible stocks after filters.")
 
-    # Optional score floor
     if min_momentum_score is not None:
         mom_df = mom_df[mom_df["MomentumScore"] >= float(min_momentum_score)]
         if mom_df.empty:
@@ -466,7 +490,6 @@ def run_strategy(
 
     # 8) Build response stocks
     stocks = []
-    # Join alloc back on ticker index
     joined = top_df.join(alloc_df.set_index("Ticker"), how="left")
     for t, r in joined.iterrows():
         stocks.append(StockData(
@@ -511,7 +534,6 @@ def run_strategy(
         except Exception as e:
             log.warning("CSV write failed: %s", e)
 
-    # 10) Summary
     total_amount = sum(s.amount for s in stocks)
     utilization_pct = (total_amount / _capital) * 100.0 if _capital > 0 else 0.0
     summary = {
@@ -574,5 +596,9 @@ def levels(tickers: str = Query(..., description="Comma-separated tickers (e.g.,
 
 # ------------ Main ------------
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)
+    try:
+        import uvicorn
+    except ImportError:
+        raise SystemExit("Uvicorn is not installed. Add 'uvicorn' to requirements.txt.")
+    port = int(os.environ.get("PORT", "8000"))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
