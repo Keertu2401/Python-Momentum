@@ -999,6 +999,7 @@ async def webhook_portfolio_compare(
         
     except Exception as e:
         logger.error(f"Portfolio compare error: {e}")
+        logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/webhook/validate-orders")
@@ -1055,12 +1056,14 @@ async def webhook_validate_orders(orders: List[Dict[str, Any]], max_position_siz
         
     except Exception as e:
         logger.error(f"Order validation error: {e}")
+        logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc):
-    """Global exception handler"""
+    """Global exception handler with comprehensive logging"""
     logger.error(f"Global exception: {exc}")
+    logger.error(traceback.format_exc())
     return JSONResponse(
         status_code=500,
         content={"detail": "Internal server error occurred"}
@@ -1072,6 +1075,8 @@ if __name__ == "__main__":
     
     # Get port from environment variable or default to 8000
     port = int(os.environ.get("PORT", 8000))
+    
+    logger.info(f"Starting server on port {port}")
     
     uvicorn.run(
         app, 
